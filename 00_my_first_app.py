@@ -1,34 +1,20 @@
 import streamlit as st
-from streamlit_chat import message
 from langchain.chat_models import ChatOpenAI
-from langchain.schema import (
-    SystemMessage,
-    HumanMessage,
-    AIMessage
-)
 from langchain.callbacks import get_openai_callback
 
-import requests
-from bs4 import BeautifulSoup
-from urllib.parse import urlparse
+from langchain.prompts import PromptTemplate
+from langchain.chains.summarize import load_summarize_chain
+from langchain.document_loaders import YoutubeLoader
 
 
 def init_page():
     st.set_page_config(
-        page_title="Website Summarizer",
+        page_title="Youtube Summarizer",
         page_icon="🤗"
     )
-    st.header("Website Summarizer 🤗")
+    st.header("Youtube Summarizer 🤗")
     st.sidebar.title("Options")
-
-
-def init_messages():
-    clear_button = st.sidebar.button("Clear Conversation", key="clear")
-    if clear_button or "messages" not in st.session_state:
-        st.session_state.messages = [
-            SystemMessage(content="You are a helpful assistant.")
-        ]
-        st.session_state.costs = []
+    st.session_state.costs = []
 
 
 def select_model():
@@ -42,87 +28,70 @@ def select_model():
 
 
 def get_url_input():
-    url = st.text_input("URL: ", key="input")
+    url = st.text_input("Youtube URL: ", key="input")
     return url
 
 
-def validate_url(url):
-    try:
-        result = urlparse(url)
-        return all([result.scheme, result.netloc])
-    except ValueError:
-        return False
+def get_document(url):
+    with st.spinner("Fetching Content ..."):
+        loader = YoutubeLoader.from_youtube_url(
+            url,
+            add_video_info=True,  # タイトルや再生数も取得できる
+            language=['en', 'ja']  # 英語→日本語の優先順位で字幕を取得
+        )
+        return loader.load()
 
 
-def get_content(url):
-    try:
-        with st.spinner("Fetching Content ..."):
-            response = requests.get(url)
-            soup = BeautifulSoup(response.text, 'html.parser')
-            # fetch text from main (change the below code to filter page)
-            if soup.main:
-                return soup.main.get_text()
-            elif soup.article:
-                return soup.article.get_text()
-            else:
-                return soup.body.get_text()
-    except:
-        st.write('something wrong')
-        return None
+def summarize(llm, docs):
+    prompt_template = """Write a concise Japanese summary of the following transcript of Youtube Video.
 
+============
+    
+{text}
 
-def build_prompt(content, n_chars=300):
-    return f"""以下はとある。Webページのコンテンツである。内容を{n_chars}程度でわかりやすく要約してください。
+============
 
-========
-
-{content[:1000]}
-
-========
-
-日本語で書いてね！
+ここから日本語で書いてね
+必ず3段落以内の200文字以内で簡潔にまとめること:
 """
+    PROMPT = PromptTemplate(template=prompt_template, input_variables=["text"])
 
-
-def get_answer(llm, messages):
     with get_openai_callback() as cb:
-        answer = llm(messages)
-    return answer.content, cb.total_cost
+        chain = load_summarize_chain( 
+            llm,
+            chain_type="stuff",
+            verbose=True,
+            prompt=PROMPT
+        )
+        response = chain({"input_documents": docs}, return_only_outputs=True)
+        
+    return response['output_text'], cb.total_cost
 
 
 def main():
     init_page()
-
     llm = select_model()
-    init_messages()
 
     container = st.container()
     response_container = st.container()
 
     with container:
         url = get_url_input()
-        is_valid_url = validate_url(url)
-        if not is_valid_url:
-            st.write('Please input valid url')
-            answer = None
+        if url:
+            document = get_document(url)
+            with st.spinner("ChatGPT is typing ..."):
+                output_text, cost = summarize(llm, document)
+            st.session_state.costs.append(cost)
         else:
-            content = get_content(url)
-            if content:
-                prompt = build_prompt(content)
-                st.session_state.messages.append(HumanMessage(content=prompt))
-                with st.spinner("ChatGPT is typing ..."):
-                    answer, cost = get_answer(llm, st.session_state.messages)
-                st.session_state.costs.append(cost)
-            else:
-                answer = None
+            output_text = None
 
-    if answer:
+    if output_text:
         with response_container:
             st.markdown("## Summary")
-            st.write(answer)
+            st.write(output_text)
             st.markdown("---")
             st.markdown("## Original Text")
-            st.write(content)
+            st.write(document)
 
     costs = st.session_state.get('costs', [])
     st.sidebar.markdown("## Costs")
